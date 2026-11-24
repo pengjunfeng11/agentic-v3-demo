@@ -84,7 +84,7 @@ test('authenticated public bootstrap/selection exposes only Bot display fields a
     assert.equal(bootstrap.status, 200);
     const body = await bootstrap.json(); safe(body);
     assert.deepEqual(body.characters.map((card: any) => card.id), [characterId, 'legacy']);
-    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'ready', limit: 24 });
+    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'ready', limit: 100 });
     assert.equal(f.seedCalls(), 0);
     const selected = await f.request('/api/characters/' + encodeURIComponent(characterId));
     assert.equal(selected.status, 200);
@@ -178,7 +178,7 @@ test('catalog failure reports an unavailable state but does not block bootstrap 
     const response = await f.request('/api/bootstrap');
     assert.equal(response.status, 200);
     const body = await response.json(); safe(body);
-    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'unavailable', limit: 24 });
+    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'unavailable', limit: 100 });
     assert.equal(body.worlds[0].id, 'w1');
     assert.deepEqual(body.characters.map((card: any) => card.id), ['legacy']);
   } finally { await f.close(); }

@@ -30,9 +30,9 @@ function fixture(options: Partial<AxonBotOptions> = {}) {
     feed: (reply: Reply) => { feed = reply; }, detail: (reply: Reply) => { detail = reply; }, rpc: (reply: Reply) => { rpc = reply; } };
 }
 
-test('hot feed requests exactly the official top 24 anonymously, keeps order, deduplicates and projects only display fields', async () => {
+test('hot feed requests exactly the official top 100 anonymously, keeps order, deduplicates and projects only display fields', async () => {
   const f = fixture();
-  const rows = Array.from({ length: 25 }, (_, i) => prompt(`bot-${i}`, { uses: 25 - i }));
+  const rows = Array.from({ length: 101 }, (_, i) => prompt(`bot-${i}`, { uses: 101 - i }));
   rows[1] = prompt('bot-0');
   rows[2] = prompt('private', { accessibility: false });
   rows[3] = prompt('draft', { live: false });
@@ -41,16 +41,16 @@ test('hot feed requests exactly the official top 24 anonymously, keeps order, de
   rows[6] = prompt('untitled', { title: '' });
   f.feed(() => json({ prompts: rows }));
   const cards = await f.catalog.list();
-  assert.equal(HOT_BOT_LIMIT, 24);
-  assert.deepEqual(cards.map(card => card.id), ['axon:bot-0', ...Array.from({ length: 17 }, (_, i) => `axon:bot-${i + 7}`)]);
-  assert(!cards.some(card => card.id === 'axon:bot-24'));
+  assert.equal(HOT_BOT_LIMIT, 100);
+  assert.deepEqual(cards.map(card => card.id), ['axon:bot-0', ...Array.from({ length: 93 }, (_, i) => `axon:bot-${i + 7}`)]);
+  assert(!cards.some(card => card.id === 'axon:bot-100'));
   assert.equal(cards[0].source, 'axon');
   assert.equal(cards[0].thumbnailUrl, 'https://cdn.example/avatar.png');
   assert.doesNotMatch(JSON.stringify(cards), /PRIVATE_|initPrompt|definition|provenance|uses|visibility/);
   const call = f.calls[0];
   assert.equal(call.url.origin, 'http://node.test');
   assert.equal(call.url.pathname, '/prompt/v2/filter');
-  assert.deepEqual(Object.fromEntries(call.url.searchParams), { sort: 'top', take: '24', skip: '0', nsfw: 'false', language: 'en' });
+  assert.deepEqual(Object.fromEntries(call.url.searchParams), { sort: 'top', take: '100', skip: '0', nsfw: 'false', language: 'en' });
   assert.equal(call.init.method, 'GET');
   assert.equal(call.init.redirect, 'error');
   assert(call.init.signal instanceof AbortSignal);

@@ -3,7 +3,7 @@ import type { Character } from '../shared/contracts.ts';
 import { ServiceError } from './runtime.ts';
 import { validateExternalCharacter, type ResolvedExternalCharacter } from './external-character.ts';
 
-export const HOT_BOT_LIMIT = 24;
+export const HOT_BOT_LIMIT = 100;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 type JsonObject = Record<string, unknown>;
 const object = (value: unknown): value is JsonObject => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
