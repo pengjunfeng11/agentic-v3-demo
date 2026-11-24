@@ -4,7 +4,8 @@ import { ServiceError, type StoryRuntime } from './runtime.ts';
 import { StoryStore } from './store.ts';
 import { TurnService } from './turn-service.ts';
 import { mountDeveloper, type DeveloperOptions } from './developer.ts';
-import { publicBootstrap, publicError, publicMessages, publicProfile, publicSessionDetail, publicTurn, publicTurnEvent, publicWorld } from './public-view.ts';
+import { publicBootstrap, publicCharacter, publicError, publicMessages, publicProfile, publicSessionDetail, publicTurn, publicTurnEvent, publicWorld } from './public-view.ts';
+import { HOT_BOT_LIMIT, type HotBotCatalog } from './axon-bots.ts';
 
 export interface AppOptions {
   store: StoryStore;
@@ -14,6 +15,7 @@ export interface AppOptions {
   audience?: 'consumer' | 'admin';
   resolveRuntime?: () => Promise<StoryRuntime>;
   developer?: DeveloperOptions;
+  characterCatalog?: HotBotCatalog;
 }
 const route = (handler: (req: Request, res: Response) => unknown) => (req: Request, res: Response, next: NextFunction) => { Promise.resolve(handler(req, res)).catch(next); };
 function text(value: unknown, field: string, max: number): string {
@@ -23,7 +25,7 @@ function text(value: unknown, field: string, max: number): string {
 function owner(res: Response): string { return res.locals.ownerId as string; }
 function id(req: Request, key: string): string { return text(req.params[key], key, 100); }
 
-export function createApp({ store, runtime, authenticate, audience = 'consumer', resolveRuntime = async () => runtime, developer }: AppOptions) {
+export function createApp({ store, runtime, authenticate, audience = 'consumer', resolveRuntime = async () => runtime, developer, characterCatalog }: AppOptions) {
   const app = express();
   const consumer = audience === 'consumer';
   const json = <T>(res: Response, value: T, project: (value: T) => unknown) => res.json(consumer ? project(value) : value);
@@ -50,10 +52,20 @@ export function createApp({ store, runtime, authenticate, audience = 'consumer',
   app.locals.shutdown = () => { stopTests(); return turns.shutdown(); };
 
   app.get('/api/bootstrap', route(async (req, res) => {
-    await store.ensureSeed(owner(res));
-    const [characters, sessions, worlds] = await Promise.all([store.listCharacters(), store.listSessions(owner(res)), store.listWorlds(owner(res))]);
-    const result: Bootstrap = { characters, sessions, worlds, status: { ...runtime.status, developerTools: !consumer && developer ? await developer.authorize(req) : false } };
+    if (!characterCatalog) await store.ensureSeed(owner(res));
+    const [localCharacters, sessions, worlds, recommended] = await Promise.all([store.listCharacters(), store.listSessions(owner(res)), store.listWorlds(owner(res)),
+      characterCatalog ? characterCatalog.list().then(characters => ({ characters, status: 'ready' as const })).catch(() => ({ characters: [], status: 'unavailable' as const })) : undefined]);
+    const characters = [...(recommended?.characters ?? []), ...localCharacters];
+    const result: Bootstrap = { characters, sessions, worlds, status: { ...runtime.status, developerTools: !consumer && developer ? await developer.authorize(req) : false },
+      ...(recommended ? { characterCatalog: { source: 'axon-hot', status: recommended.status, limit: HOT_BOT_LIMIT } } : {}) };
     json(res, result, publicBootstrap);
+  }));
+  app.get('/api/characters/:id', route(async (req, res) => {
+    const characterId = id(req, 'id');
+    if (!characterCatalog || !characterId.startsWith('axon:')) throw new ServiceError('CHARACTER_NOT_FOUND', '角色不可用。', 404);
+    const character = await characterCatalog.resolve(characterId);
+    // Both audiences receive only the card's display fields through this route.
+    res.json(publicCharacter(character));
   }));
   app.post('/api/sessions', route(async (req, res) => {
     const characterId = text(req.body?.characterId, '角色', 100);
@@ -63,12 +75,14 @@ export function createApp({ store, runtime, authenticate, audience = 'consumer',
     if (req.body?.dynamicOpening && !runtime.runWorldTurn) throw new ServiceError('OPENING_UNAVAILABLE', '当前运行时尚未提供动态开场。', 503);
     const playerProfileId = req.body?.playerProfileId;
     if(playerProfileId !== undefined && playerProfileId !== null) text(playerProfileId,'玩家身份',100);
+    const externalCharacter = !worldId && characterId.startsWith('axon:')
+      ? await (characterCatalog?.resolve(characterId) ?? Promise.reject(new ServiceError('CHARACTER_NOT_FOUND', '角色不可用。', 404))) : undefined;
     json(res.status(201), await store.createSession(owner(res), characterId, worldId, {
       ...(req.body?.dynamicOpening !== undefined ? { dynamicOpening: req.body.dynamicOpening } : {}),
       ...(req.body?.scene !== undefined ? { scene: req.body.scene } : {}),
       ...(req.body?.expectedRevision !== undefined ? { expectedRevision: req.body.expectedRevision } : {}),
       ...(playerProfileId !== undefined ? { playerProfileId } : {}),
-    }), publicSessionDetail);
+    }, externalCharacter), publicSessionDetail);
   }));
   app.get('/api/player-profiles',route(async (_req,res)=>json(res,{profiles:await store.listPlayerProfiles(owner(res))}, value => ({profiles:value.profiles.map(publicProfile)}))));
   app.post('/api/player-profiles',route(async (req,res)=>json(res.status(201),await store.savePlayerProfile(owner(res),null,req.body),publicProfile)));

@@ -9,6 +9,13 @@ export function worldBackgroundStatus(world?: WorldView) {
 export function entityCharacter(entity: WorldEntity, templates: Character[] = []): Character {
   const template = templates.find(character => character.id === entity.id);
   const color = entity.state.color;
+  if (entity.state.characterSource === 'axon') return {
+    id: entity.id, name: entity.name, description: entity.description,
+    subtitle: text(entity.state.characterSubtitle) || '故事的起点', initial: text(entity.state.initial) || entity.name.slice(0, 1),
+    color: color === 'blue' || color === 'peach' ? color : 'sage', greeting: '', source: 'axon',
+    thumbnailUrl: text(entity.state.characterThumbnailUrl) || null, coverUrl: text(entity.state.characterCoverUrl) || null,
+    language: text(entity.state.characterLanguage) || 'und',
+  };
   return { ...template, id: entity.id, name: entity.name, description: entity.description, subtitle: template?.subtitle || (template || entity.state.origin === 'seed' ? '故事的起点' : '在这个故事中结识'), initial: text(entity.state.initial) || entity.name.slice(0, 1), color: color === 'blue' || color === 'peach' || color === 'sage' ? color : template?.color || 'sage', greeting: text(entity.state.greeting), source: template?.source || 'generated' };
 }
 export function worldCharacters(world: WorldView | undefined, templates: Character[], focusId?: string): Character[] {

@@ -32,6 +32,14 @@ The trusted proxy overwrites `X-Agentic-Gateway-Secret`, `X-Agentic-User-Id` and
 
 Use a separate migration job with `MIGRATION_DATABASE_URL` and `DATABASE_URL`: `npm run db:migrate`, then `npm run db:seed-prompts` for first initialization. Seeding preserves published versions. Do not run `db:publish-world-prompts` as a routine startup action. No account, conversation or legacy database import is implicit in this image. Do not mount migration credentials into normal application containers.
 
+## Optional public hot Bot catalog
+
+Enable `AXON_BOT_CATALOG_ENABLED=true` with server-only `NODE_BOT_CATALOG_BASE_URL` (Node origin) and `AXON_BOT_RPC_URL` (Axon `/rpc` URL). These services are called anonymously; no user's account token is forwarded or required. The Node official `sort=top` feed supplies at most 24 public recommendations, in its own order, cached for 60 seconds. This does not crawl, synchronize or search the full catalog. New visitors start at the recommended character list; existing stories remain accessible when the feed is unavailable.
+
+Selecting a card and creating a new story each recheck anonymous Node access before Axon `prompt.get`. Private/inaccessible and nonrecommended IDs cannot be imported through this route. The server stores the complete authored definition and greeting as an owner/world snapshot; the browser receives display fields only. Existing stories retain their saved character if the catalog changes or becomes unavailable. No global character-table writes or database migration are needed. Overlong definitions are rejected rather than silently truncated.
+
+The dedicated PostgreSQL fixture tests in `test/external-character.test.ts` cover both runtime modes, owner isolation, immutable authored metadata and old-world continuity. Run these against an isolated test database before release, in addition to the image's pure adapter and API boundary checks.
+
 ## Release checks
 
 The image build checks types, both builds, consumer artifact boundaries, auth/API/SSE privacy tests and bounded Harness regression tests. Final gateway acceptance must still verify forged identity headers, distinct guest ownership, absent consumer management APIs, admin HTML and assets requiring admin identity, `/verification` and source maps unavailable, successful streaming/persistence, and retained published six-policy configuration. A successful readiness check is not full chat/background acceptance.

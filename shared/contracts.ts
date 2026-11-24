@@ -4,7 +4,7 @@ export interface Character {
   id: string; name: string; subtitle: string; description: string;
   initial: string; color: 'sage' | 'blue' | 'peach'; greeting: string;
   thumbnailUrl?: string | null; coverUrl?: string | null; language?: string;
-  source?: 'sample' | 'legacy' | 'generated';
+  source?: 'sample' | 'legacy' | 'generated' | 'axon';
 }
 export interface PlayerProfile { id: string; name: string; persona: string; version: number }
 export interface SceneState { location: string | null; presentCharacterIds: string[]; updatedAt?: string; mode?: 'direct' | 'ensemble' | 'observe'; situation?: string; playerPresent?: boolean }
@@ -81,6 +81,7 @@ export interface RuntimeAuditView {
 }
 export interface Bootstrap {
   characters: Character[]; sessions: Session[]; worlds: WorldView[];
+  characterCatalog?: { source: 'axon-hot'; status: 'ready' | 'unavailable'; limit: number };
   status: Pick<RuntimeStatus, 'provider'> & Partial<Omit<RuntimeStatus, 'provider'>>;
 }
 export interface SessionDetail { session: Session; messages: Message[]; world: WorldView; hasMore: boolean; nextBefore: string | null }

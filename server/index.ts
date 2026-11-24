@@ -1,7 +1,8 @@
 import { resolve } from 'node:path';
 import { createApp } from './app.ts';
 import { StoryStore } from './store.ts';
-import { databaseSettings, loadLocalEnvironment, projectRoot, serverSettings } from './config.ts';
+import { botCatalogSettings, databaseSettings, loadLocalEnvironment, projectRoot, serverSettings } from './config.ts';
+import { createAxonBotCatalog } from './axon-bots.ts';
 import { createPool } from './database.ts';
 import { loadRuntime } from './load-runtime.ts';
 import { oldAgentPolicies } from './legacy-agents.ts';
@@ -17,6 +18,8 @@ async function main() {
   const settings = databaseSettings();
   const pool = createPool(settings.connectionString, { max: settings.max });
   const store = new StoryStore(pool, { livingWorld: true });
+  const catalogSettings = botCatalogSettings();
+  const characterCatalog = catalogSettings ? createAxonBotCatalog(catalogSettings) : undefined;
   let vite: Awaited<ReturnType<typeof import('vite')['createServer']>> | undefined;
   try {
     // Internal capability bridge: source/world/actor are frozen by Harness, not model arguments.
@@ -28,7 +31,7 @@ async function main() {
     const publishedPrompts = await store.getPrompts();
     if (!runtime.prompts || Object.keys(runtime.prompts).some(key => !publishedPrompts.some(row => row.key === key))) throw new Error('请先运行 db:seed-prompts 初始化 Agent Prompt。');
     const defaults = { ...runtime.prompts };
-    const app = createApp({ store, runtime, audience, authenticate: auth.authenticate,
+    const app = createApp({ store, runtime, audience, authenticate: auth.authenticate, characterCatalog,
       resolveRuntime: async () => { const snapshot = await promptSnapshot(store, defaults); return loadRuntime({ prompts: snapshot.prompts, promptVersions: snapshot.versions, readDialogue,oldAgents }); },
       ...(audience === 'admin' ? { developer: { authorize: auth.authorizeAdmin, defaultPrompts: defaults,
         buildRuntime: (prompts: typeof defaults, promptVersions: NonNullable<Parameters<typeof loadRuntime>[0]>['promptVersions']) => loadRuntime({ prompts, promptVersions, readDialogue,oldAgents }) } } : {}),

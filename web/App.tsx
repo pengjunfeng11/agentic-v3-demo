@@ -49,6 +49,7 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
   const atBottom = useRef(true);
   const [showScroll, setShowScroll] = useState(false);
   const mounted = useRef(true);
+  const characterRequest = useRef<AbortController | null>(null);
   const refresh = useCallback(() => {
     void client.bootstrap().then(result => { if (mounted.current) { setBootstrap(result); setBootError(''); } }).catch(error => { if (mounted.current) setBootError(error.message || '无法连接故事服务。'); });
   }, [client]);
@@ -56,6 +57,9 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
   const activeWorld = state.detail?.world;
   const { failedTurns, pendingTurns } = worldBackgroundStatus(activeWorld);
   const characters = bootstrap?.characters || [];
+  const libraryCharacters = bootstrap?.characterCatalog
+    ? characters.filter(character => character.source === 'axon' || character.source === 'sample')
+    : characters.filter(character => character.source !== 'generated');
   const cast = worldCharacters(activeWorld, characters, state.detail?.session.characterId);
   const activeCharacter = cast.find(character => character.id === state.detail?.session.characterId) || characters.find(character => character.id === state.detail?.session.characterId);
   const activeWorldId = activeWorld?.id;
@@ -63,11 +67,14 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
   const characterPresent = !activeWorld?.scene || !activeCharacter || activeWorld.scene.presentCharacterIds.includes(activeCharacter.id);
 
   useEffect(() => { mounted.current = true; refresh(); return () => { mounted.current = false; }; }, [refresh]);
+  useEffect(() => () => { characterRequest.current?.abort(); }, [view, selectedId, drawer]);
   useEffect(() => {
     if (selectedId || !bootstrap) return;
     let remembered: string | null = null;
     try { remembered = localStorage.getItem(lastSessionKey(draftKeyPrefix)); } catch { /* Storage can be disabled by the host. */ }
-    setSelectedId(resolveInitialSession(bootstrap.sessions, initialSessionId, remembered));
+    const initial = resolveInitialSession(bootstrap.sessions, initialSessionId, remembered);
+    setSelectedId(initial);
+    if (!initial && bootstrap.characterCatalog) setView('characters');
   }, [bootstrap, selectedId, initialSessionId, draftKeyPrefix]);
   useEffect(() => {
     // A click or a stale response is not a successful open; only persist the loaded selection.
@@ -115,6 +122,17 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
     const matches = bootstrap?.sessions.filter(session => session.characterId === character.id) || [];
     const sameWorldSession = !fresh && (matches.find(session => session.worldId === activeWorldId) || matches[0]);
     if (sameWorldSession) { openSession(sameWorldSession.id); return; }
+    if (character.source === 'axon' && (!activeWorld || fresh || !cast.some(item => item.id === character.id))) {
+      if (!client.character) { setNotice('角色暂时无法读取，请刷新页面。'); return; }
+      const request = new AbortController();
+      characterRequest.current?.abort();
+      characterRequest.current = request;
+      setCreating(character.id);
+      try { character = await client.character(character.id, { signal: request.signal }); }
+      catch (error) { if (mounted.current && !request.signal.aborted) setNotice(error instanceof Error ? error.message : '角色暂时无法读取。'); return; }
+      finally { if (mounted.current) setCreating(null); }
+      if (!mounted.current || request.signal.aborted) return;
+    }
     setDrawer(null);
     setSceneBuilder(!fresh && cast.some(item => item.id === character.id) ? { world: activeWorld, defaults: { characterId: character.id } } : { seed: character });
   }
@@ -184,7 +202,7 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
     </aside>
 
     <main className="av-main">
-      {!bootstrap ? <div className="av-center-state">{bootError ? <><CircleHelp /><h2>故事服务暂未连接</h2><p>{bootError}</p><button className="av-button" onClick={refresh}><RotateCcw size={14} />重新连接</button></> : <><LoaderCircle className="av-spin" /><p>正在翻开故事…</p></>}</div> : view === 'characters' ? <CharacterLibrary characters={characters.filter(character => character.source !== 'generated')} fresh={true} hasWorld={false} creating={creating} onChoose={character => void chooseCharacter(character, true)} onBack={() => setView('chat')} /> : view === 'world' ? <WorldArchive world={activeWorld} templates={characters} focusId={activeCharacter?.id} client={client} busy={pending || state.loading} onBack={() => setView('chat')} onScene={(world, defaults) => setSceneBuilder({ world, defaults })} onUpdated={async () => { await reload(); refresh(); }} /> : view === 'settings' ? <>
+      {!bootstrap ? <div className="av-center-state">{bootError ? <><CircleHelp /><h2>故事服务暂未连接</h2><p>{bootError}</p><button className="av-button" onClick={refresh}><RotateCcw size={14} />重新连接</button></> : <><LoaderCircle className="av-spin" /><p>正在翻开故事…</p></>}</div> : view === 'characters' ? <CharacterLibrary characters={libraryCharacters} catalogStatus={bootstrap.characterCatalog?.status} onRefresh={refresh} fresh={true} hasWorld={false} creating={creating} onChoose={character => void chooseCharacter(character, true)} onBack={() => setView('chat')} /> : view === 'world' ? <WorldArchive world={activeWorld} templates={characters} focusId={activeCharacter?.id} client={client} busy={pending || state.loading} onBack={() => setView('chat')} onScene={(world, defaults) => setSceneBuilder({ world, defaults })} onUpdated={async () => { await reload(); refresh(); }} /> : view === 'settings' ? <>
         <header className="av-page-header"><div><span className="av-eyebrow">MAKE YOURSELF COMFORTABLE</span><h2>给对话，留一点自己的空间。</h2><p>只保留真正需要的偏好。</p></div><IconButton label="返回聊天" onClick={() => setView('chat')}><ArrowLeft size={19} /></IconButton></header>
         <div className="av-settings"><PlayerProfiles client={client} world={state.detail?.session.id === selectedId ? activeWorld : undefined} busy={pending||state.loading||state.detail?.session.id !== selectedId} onApplied={refreshPlayerWorld} /><section><span className="av-setting-icon"><Settings2 size={20} /></span><h3>阅读偏好</h3><p>调整消息文字的大小，让长一点的故事也轻松好读。</p><label className="av-setting-row"><span>文字大小 <small>{fontSize}px</small></span><input type="range" min="13" max="19" value={fontSize} onChange={event => setFontSize(Number(event.target.value))} /></label><div className="av-reading-preview" style={{ fontSize }}>风翻过书页，而我们的故事，才刚刚开始。</div></section><section><span className="av-setting-icon"><Sparkles size={20} /></span><h3>关于续章</h3><p>一个围绕角色、对话与持续记忆的轻量实验。</p><dl><div><dt>当前运行</dt><dd>{isDemo ? '演示模式' : '在线生成'}</dd></div><div><dt>消息和故事</dt><dd>服务端持久保存</dd></div></dl><p className="av-settings-note">{isDemo ? '演示模式不调用真实语言模型。你看到的角色回复用于验证交互与持久化流程。' : '回复由当前配置的模型生成；故事变化以服务端确认的状态为准。'}</p></section></div>
       </> : <>

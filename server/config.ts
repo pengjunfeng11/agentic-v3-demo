@@ -58,3 +58,9 @@ export function serverSettings(env: NodeJS.ProcessEnv = process.env) {
     adminPort: integer(env.ADMIN_PORT, 7634, 'ADMIN_PORT', 1, 65535),
     harnessPath: env.HARNESS_MODULE_PATH || resolve(env.HARNESS_ROOT || resolve(projectRoot, '../../roleplay-harness'), 'dist/apps/agentic-v3/index.js') };
 }
+
+export function botCatalogSettings(env: NodeJS.ProcessEnv = process.env) {
+  if (env.AXON_BOT_CATALOG_ENABLED !== 'true') return undefined;
+  if (!env.NODE_BOT_CATALOG_BASE_URL || !env.AXON_BOT_RPC_URL) throw new Error('Bot catalog endpoints are required.');
+  return { nodeBaseUrl: env.NODE_BOT_CATALOG_BASE_URL, axonRpcUrl: env.AXON_BOT_RPC_URL };
+}

@@ -23,6 +23,18 @@ function publicEntity(value: WorldEntity): WorldEntity {
   for (const key of ['initial', 'color', 'narrativeName', 'locationId', 'parentLocationId', 'holderCharacterId', 'ownerCharacterId']) {
     if (typeof value.state[key] === 'string') state[key] = value.state[key];
   }
+  if (value.kind === 'npc' && value.state.characterSource === 'axon') {
+    state.characterSource = 'axon';
+    for (const key of ['characterSubtitle', 'characterLanguage']) if (typeof value.state[key] === 'string') state[key] = value.state[key];
+    for (const key of ['characterThumbnailUrl', 'characterCoverUrl']) {
+      const url = value.state[key];
+      if (url === null) state[key] = null;
+      else if (typeof url === 'string') {
+        try { const parsed = new URL(url); if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) state[key] = url; }
+        catch { /* Invalid stored media never becomes a browser URL. */ }
+      }
+    }
+  }
   if (['proposed', 'active', 'completed', 'failed', 'cancelled'].includes(String(value.state.status))) state.status = value.state.status;
   return { id: value.id, kind: value.kind, name: value.name, description: value.description, state,
     knownByCharacterIds: value.knownByCharacterIds.filter((id: string) => typeof id === 'string'), sourceTurnId: value.sourceTurnId,
@@ -65,9 +77,14 @@ export function publicSessionDetail(value: SessionDetail): SessionDetail {
 }
 export function publicBootstrap(value: Bootstrap): Bootstrap {
   return { characters: value.characters.map(publicCharacter), sessions: value.sessions.map(publicSession),
-    worlds: value.worlds.map(publicWorld), status: { provider: value.status.provider } };
+    worlds: value.worlds.map(publicWorld), status: { provider: value.status.provider },
+    ...(value.characterCatalog ? { characterCatalog: { source: value.characterCatalog.source,
+      status: value.characterCatalog.status, limit: value.characterCatalog.limit } } : {}) };
 }
 const errors: Record<string, string> = {
+  BOT_CATALOG_UNAVAILABLE: '热门角色暂时无法读取，请稍后重试。',
+  EXTERNAL_CHARACTER_INVALID: '角色卡内容无效或过长，请选择其他角色。',
+  EXTERNAL_CHARACTER_WORLD_SCOPE: '已有故事只能使用本世界保存的角色。',
   AUTH_REQUIRED: '请先登录。', DEVELOPER_REQUIRED: '你没有访问此功能的权限。',
   INPUT_INVALID: '请求内容无效，请检查后重试。', NOT_FOUND: '内容不存在或无法访问。',
   WORLD_CHANGED: '故事已更新，请刷新后重试。', RUNTIME_CHANGED: '会话配置已更新，请刷新后重新发送。',
