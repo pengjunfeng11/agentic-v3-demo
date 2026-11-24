@@ -1,11 +1,12 @@
 import { ApiError, createApiTransport, type ApiClientOptions, type RequestOptions } from './http';
 export { ApiError, type ApiClientOptions, type RequestOptions } from './http';
-import type { PlayerProfile, Bootstrap, Message, SceneState, SessionDetail, TurnEvent, TurnView, WorldView } from '../shared/contracts';
+import type { Character, CharacterPage, PlayerProfile, Bootstrap, Message, SceneState, SessionDetail, TurnEvent, TurnView, WorldView } from '../shared/contracts';
 
 export class StreamInterruptedError extends Error {
   constructor(public turnId: string | null) { super('连接中断，正在确认消息是否已保存。'); this.name = 'StreamInterruptedError'; }
 }
-export interface CreateSessionInput { playerProfileId?: string | null; characterId: string; worldId?: string; dynamicOpening?: boolean; scene?: SceneState; expectedRevision?: number }
+export interface CreateSessionInput { playerProfileId?: string | null; characterId: string; catalogOffset?: number; worldId?: string; dynamicOpening?: boolean; scene?: SceneState; expectedRevision?: number }
+export interface CharacterRequestOptions extends RequestOptions { catalogOffset?: number }
 export interface ApiClient {
   /** Non-secret owner/workspace storage scope supplied by the embedding host. */
   readonly storageNamespace?: string;
@@ -14,6 +15,8 @@ export interface ApiClient {
   deletePlayerProfile(id:string,expectedVersion:number,options?: RequestOptions): Promise<void>;
   setPlayerProfile(worldId:string,input:{profileId:string|null;expectedRevision:number},options?:RequestOptions):Promise<WorldView>;
   bootstrap(options?: RequestOptions): Promise<Bootstrap>;
+  characterPage?(offset: number, options?: RequestOptions): Promise<CharacterPage>;
+  character?(id: string, options?: CharacterRequestOptions): Promise<Character>;
   createSession(input: CreateSessionInput, options?: RequestOptions): Promise<SessionDetail>;
   world(id: string, options?: RequestOptions): Promise<WorldView>;
   retrySettlements(id: string, options?: RequestOptions): Promise<WorldView>;
@@ -54,6 +57,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     deletePlayerProfile: async (id,expectedVersion,options) => { await request('/player-profiles/'+encodeURIComponent(id),options,'DELETE',{expectedVersion}); },
     setPlayerProfile: (worldId,input,options) => json('/worlds/'+encodeURIComponent(worldId)+'/player-profile',options,'PATCH',input),
     bootstrap: options => json('/bootstrap', options),
+    characterPage: (offset, options) => json('/characters?offset=' + encodeURIComponent(offset), options),
+    character: (id, options) => json('/characters/' + encodeURIComponent(id) + (options?.catalogOffset === undefined ? '' : '?offset=' + encodeURIComponent(options.catalogOffset)), options),
     createSession: (input, options) => json('/sessions', options, 'POST', input),
     world: (id, options) => json('/worlds/' + encodeURIComponent(id), options),
     retrySettlements: (id, options) => json('/worlds/' + encodeURIComponent(id) + '/settlements/retry', options, 'POST', {}),

@@ -18,6 +18,7 @@ import { appendRuntimeAudit,readRuntimeAudit,auditEntity } from './runtime-audit
 import { playerDeparture } from '../shared/scene-transition.ts';
 import { validMovementEvidence } from './movement.ts';
 import { unknownStoryTime, initialStoryTime, validStoryTime, resolveStoryTime, settlementWindow } from '../shared/story-time.ts';
+import { validateExternalCharacter, type ResolvedExternalCharacter } from './external-character.ts';
 
 type Row = Record<string, any>;
 type Query = Pool | PoolClient;
@@ -59,7 +60,7 @@ const settlementRuntimeErrors: Readonly<Record<string,string>> = Object.freeze({
   PROVIDER_CONTENT_FILTER:'模型服务未返回可用内容，原始回复已保留。',
   AGENT_CANCELLED:'后台 Agent 调用已取消，原始回复已保留。',
 });
-const internalStateKeys = ['lastEncounterAt','lastEncounterStoryTime','lastSettledStoryTime','lastSettledStoryMs','lastSettledAt','lastSettledWorldMs','lastSettledActiveMs','pendingRealMs','pendingWorldMs','pendingActiveRealMs','origin','rootCharacterId','source','legacyEnsembleMemory','authoredSharedMemory','authoredCastSplitAfterSeq'];
+const internalStateKeys = ['lastEncounterAt','lastEncounterStoryTime','lastSettledStoryTime','lastSettledStoryMs','lastSettledAt','lastSettledWorldMs','lastSettledActiveMs','pendingRealMs','pendingWorldMs','pendingActiveRealMs','origin','rootCharacterId','source','legacyEnsembleMemory','authoredSharedMemory','authoredCastSplitAfterSeq','externalCharacterProvenance','characterSource','characterSubtitle','characterThumbnailUrl','characterCoverUrl','characterLanguage'];
 const iso = (value: Date | string): string => new Date(value).toISOString();
 const uuid = (value: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 const contextScene = (value: SceneState): SceneState => ({ location: value.location, presentCharacterIds: [...value.presentCharacterIds], ...(value.mode ? { mode: value.mode } : {}), ...(value.situation ? { situation: value.situation } : {}), ...(value.playerPresent !== undefined ? { playerPresent: value.playerPresent } : {}) });
@@ -349,7 +350,10 @@ export class StoryStore {
     }
     const world = await this.scopedWorld(q,ownerId,worldId);
     const narrativeName = authorNarrativeName(character.source?.narrativeName);
-    await q.query(`INSERT INTO world_entities(owner_id,world_id,id,kind,name,description,state,known_by_character_ids) VALUES($1,$2,$3,'npc',$4,$5,$6,$7) ON CONFLICT(world_id,id) DO NOTHING`, [ownerId, worldId, character.id, character.name, character.description, { definition: character.definition, greeting: character.greeting, initial: character.initial, color: character.color, ...(narrativeName ? { narrativeName } : {}), ...(character.source?.castKey ? {authoredCastKey:character.source.castKey,narrativeAliases:character.source.narrativeAliases??[]} : {}), origin: 'seed', rootCharacterId: rootId, lastSettledAt: await this.now(q), lastSettledStoryTime: validStoryTime(world.story_time) ? world.story_time : unknownStoryTime(), lastSettledStoryMs:Number(world.story_elapsed_ms) }, [character.id]]);
+    const external = character.source === 'axon' ? { characterSource: 'axon', characterSubtitle: character.subtitle,
+      characterThumbnailUrl: character.thumbnailUrl ?? null, characterCoverUrl: character.coverUrl ?? null, characterLanguage: character.language ?? 'und',
+      externalCharacterProvenance: character.provenance } : {};
+    await q.query(`INSERT INTO world_entities(owner_id,world_id,id,kind,name,description,state,known_by_character_ids) VALUES($1,$2,$3,'npc',$4,$5,$6,$7) ON CONFLICT(world_id,id) DO NOTHING`, [ownerId, worldId, character.id, character.name, character.description, { definition: character.definition, greeting: character.greeting, initial: character.initial, color: character.color, ...external, ...(narrativeName ? { narrativeName } : {}), ...(character.source?.castKey ? {authoredCastKey:character.source.castKey,narrativeAliases:character.source.narrativeAliases??[]} : {}), origin: 'seed', rootCharacterId: rootId, lastSettledAt: await this.now(q), lastSettledStoryTime: validStoryTime(world.story_time) ? world.story_time : unknownStoryTime(), lastSettledStoryMs:Number(world.story_elapsed_ms) }, [character.id]]);
     await this.rememberEntities(q,ownerId,worldId,[character.id],[character.id]);
   }
   /** The caller holds this world's lock (or created it in this transaction). */
@@ -381,7 +385,7 @@ export class StoryStore {
       await this.rememberEntities(q,ownerId,worldId,[locationId,...present],present,null,true);
     }
   }
-  private async createSessionIn(q: PoolClient, ownerId: string, characterId: string, worldId?: string, options: CreateSessionOptions = {}): Promise<SessionDetail> {
+  private async createSessionIn(q: PoolClient, ownerId: string, characterId: string, worldId?: string, options: CreateSessionOptions = {}, externalCharacter?: ResolvedExternalCharacter): Promise<SessionDetail> {
     const id = randomUUID(); const selectedWorld = worldId ?? randomUUID();
     let character: Row | undefined; let scene: SceneState;
     if (worldId) {
@@ -400,7 +404,7 @@ export class StoryStore {
       scene = await this.validateScene(q, { ...base, presentCharacterIds: base.presentCharacterIds.includes(characterId) ? base.presentCharacterIds : [...base.presentCharacterIds, characterId] }, ownerId, worldId);
       if (options.dynamicOpening || options.scene || !isDeepStrictEqual(scene, world.scene)) await q.query("UPDATE worlds SET scene=$3::jsonb || jsonb_build_object('updatedAt',clock_timestamp()),revision=revision+1 WHERE id=$1 AND owner_id=$2", [worldId, ownerId, scene]);
     } else {
-      character = await this.row(q, 'SELECT * FROM characters WHERE id=$1', [characterId]);
+      character = externalCharacter ?? await this.row(q, 'SELECT * FROM characters WHERE id=$1', [characterId]);
       if (!character) throw new ServiceError('CHARACTER_NOT_FOUND', '角色不存在。', 404);
       const cast=castProfiles(character);
       scene = options.scene ?? { location: null, presentCharacterIds: cast?cast.filter(member=>member.presentAtStart).map(member=>member.id):[characterId], ...(options.dynamicOpening||cast ? { mode: 'ensemble' as const } : {}) };
@@ -415,7 +419,11 @@ export class StoryStore {
     if (!worldId && !options.dynamicOpening) await q.query("INSERT INTO messages(id,owner_id,world_id,session_id,role,content,character_id,character_name,player_name) VALUES($1,$2,$3,$4,'assistant',$5,$6,$7,(SELECT player_profile->>'name' FROM worlds WHERE id=$3 AND owner_id=$2))", [randomUUID(), ownerId, selectedWorld, id, character.greeting, characterId, character.name]);
     return this.sessionDetail(q, ownerId, id);
   }
-  async createSession(ownerId: string, characterId: string, worldId?: string, options: CreateSessionOptions = {}): Promise<SessionDetail> { return this.transaction((q) => this.createSessionIn(q, ownerId, characterId, worldId, options)); }
+  async createSession(ownerId: string, characterId: string, worldId?: string, options: CreateSessionOptions = {}, externalCharacter?: ResolvedExternalCharacter): Promise<SessionDetail> {
+    if (externalCharacter !== undefined && worldId !== undefined) throw new ServiceError('EXTERNAL_CHARACTER_WORLD_SCOPE', '已有故事只能使用本世界保存的角色。', 422);
+    const resolved = externalCharacter === undefined ? undefined : validateExternalCharacter(externalCharacter, characterId);
+    return this.transaction((q) => this.createSessionIn(q, ownerId, characterId, worldId, options, resolved));
+  }
   /** Explicit maintenance operation: a reviewed cast import repairs old combined
    * identities. Historical text and frozen jobs are never silently rewritten. */
   async repairAuthoredCast(ownerId:string,worldId:string,expectedRevision:number,sharedMemory?:{summary:string;sourceTurnIds:string[]}):Promise<WorldView> {
@@ -626,7 +634,7 @@ export class StoryStore {
     snapshot ??= living ? await loadContextSnapshot(q,ownerId,world.id) : undefined;
     const entityRow = snapshot ? snapshot.entities.find(row=>row.id===actorId && row.kind==='npc') : await this.row(q, "SELECT * FROM world_entities WHERE owner_id=$1 AND world_id=$2 AND id=$3 AND kind='npc'", [ownerId, world.id, actorId]);
     if (!entityRow) throw new ServiceError('CHARACTER_NOT_FOUND', '角色不属于这个世界。', 404);
-    const character = !living && !entityRow.state.authoredCastKey ? await this.row(q, 'SELECT * FROM characters WHERE id=$1', [actorId]) : undefined;
+    const character = !living && !entityRow.state.authoredCastKey && entityRow.state.characterSource !== 'axon' ? await this.row(q, 'SELECT * FROM characters WHERE id=$1', [actorId]) : undefined;
     const profile = character ?? { id: entityRow.id, name: entityRow.name, description: entityRow.description, definition: entityRow.state.definition ?? entityRow.description, greeting: entityRow.state.greeting ?? '' };
     const templateNames = { char: authorNarrativeName(entityRow.state.narrativeName) ?? profile.name, user: world.player_profile?.name || '玩家' };
     const cardText = (text: unknown) => resolveRoleplayTemplate(String(text ?? ''), templateNames);

@@ -19,7 +19,7 @@ RUN npm ci --no-audit --no-fund \
  && npm run check \
  && npm run build \
  && npm run build:admin \
- && node --import tsx --test test/auth-entry.test.ts test/consumer-boundary.test.ts test/consumer-privacy.test.ts test/frontend.test.ts \
+ && node --import tsx --test test/auth-entry.test.ts test/consumer-boundary.test.ts test/consumer-privacy.test.ts test/frontend.test.ts test/frontend-world.test.ts test/frontend-character-pages.test.ts test/axon-bots.test.ts test/axon-bot-routes.test.ts \
  && node --test /runtime/dist/test/agentic-v3-visible-text.test.js /runtime/dist/test/agentic-v3-dialogue-tool.test.js /runtime/dist/test/agentic-v3-scene-rewrite.test.js /runtime/dist/test/agentic-v3-old-agent-team.test.js /runtime/dist/test/agentic-v3-runtime.test.js
 ENV NODE_ENV=production \
     HARNESS_ROOT=/runtime \

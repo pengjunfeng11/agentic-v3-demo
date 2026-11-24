@@ -4,7 +4,8 @@ import { ServiceError, type StoryRuntime } from './runtime.ts';
 import { StoryStore } from './store.ts';
 import { TurnService } from './turn-service.ts';
 import { mountDeveloper, type DeveloperOptions } from './developer.ts';
-import { publicBootstrap, publicError, publicMessages, publicProfile, publicSessionDetail, publicTurn, publicTurnEvent, publicWorld } from './public-view.ts';
+import { publicBootstrap, publicCharacter, publicError, publicMessages, publicProfile, publicSessionDetail, publicTurn, publicTurnEvent, publicWorld } from './public-view.ts';
+import { HOT_BOT_MAX_OFFSET, HOT_BOT_PAGE_SIZE, type HotBotCatalog } from './axon-bots.ts';
 
 export interface AppOptions {
   store: StoryStore;
@@ -14,6 +15,7 @@ export interface AppOptions {
   audience?: 'consumer' | 'admin';
   resolveRuntime?: () => Promise<StoryRuntime>;
   developer?: DeveloperOptions;
+  characterCatalog?: HotBotCatalog;
 }
 const route = (handler: (req: Request, res: Response) => unknown) => (req: Request, res: Response, next: NextFunction) => { Promise.resolve(handler(req, res)).catch(next); };
 function text(value: unknown, field: string, max: number): string {
@@ -22,8 +24,17 @@ function text(value: unknown, field: string, max: number): string {
 }
 function owner(res: Response): string { return res.locals.ownerId as string; }
 function id(req: Request, key: string): string { return text(req.params[key], key, 100); }
+function catalogOffset(value: unknown, query = false): number {
+  if (value === undefined) return 0;
+  if (query) {
+    if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) throw new ServiceError('INPUT_INVALID', '角色分页位置无效。', 422);
+    value = Number(value);
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > HOT_BOT_MAX_OFFSET) throw new ServiceError('INPUT_INVALID', '角色分页位置无效。', 422);
+  return value;
+}
 
-export function createApp({ store, runtime, authenticate, audience = 'consumer', resolveRuntime = async () => runtime, developer }: AppOptions) {
+export function createApp({ store, runtime, authenticate, audience = 'consumer', resolveRuntime = async () => runtime, developer, characterCatalog }: AppOptions) {
   const app = express();
   const consumer = audience === 'consumer';
   const json = <T>(res: Response, value: T, project: (value: T) => unknown) => res.json(consumer ? project(value) : value);
@@ -50,10 +61,25 @@ export function createApp({ store, runtime, authenticate, audience = 'consumer',
   app.locals.shutdown = () => { stopTests(); return turns.shutdown(); };
 
   app.get('/api/bootstrap', route(async (req, res) => {
-    await store.ensureSeed(owner(res));
+    if (!characterCatalog) await store.ensureSeed(owner(res));
     const [characters, sessions, worlds] = await Promise.all([store.listCharacters(), store.listSessions(owner(res)), store.listWorlds(owner(res))]);
-    const result: Bootstrap = { characters, sessions, worlds, status: { ...runtime.status, developerTools: !consumer && developer ? await developer.authorize(req) : false } };
+    const result: Bootstrap = { characters, sessions, worlds, status: { ...runtime.status, developerTools: !consumer && developer ? await developer.authorize(req) : false },
+      ...(characterCatalog ? { characterCatalog: { source: 'axon-hot', status: 'ready', limit: HOT_BOT_PAGE_SIZE, nextOffset: 0 } } : {}) };
     json(res, result, publicBootstrap);
+  }));
+  app.get('/api/characters', route(async (req, res) => {
+    const offset = catalogOffset(req.query.offset, true);
+    if (!characterCatalog) throw new ServiceError('CHARACTER_NOT_FOUND', '角色目录不可用。', 404);
+    const page = await characterCatalog.list(offset);
+    res.json({ characters: page.characters.map(publicCharacter), nextOffset: page.nextOffset });
+  }));
+  app.get('/api/characters/:id', route(async (req, res) => {
+    const characterId = id(req, 'id');
+    const offset = catalogOffset(req.query.offset, true);
+    if (!characterCatalog || !characterId.startsWith('axon:')) throw new ServiceError('CHARACTER_NOT_FOUND', '角色不可用。', 404);
+    const character = await characterCatalog.resolve(characterId, offset);
+    // Both audiences receive only the card's display fields through this route.
+    res.json(publicCharacter(character));
   }));
   app.post('/api/sessions', route(async (req, res) => {
     const characterId = text(req.body?.characterId, '角色', 100);
@@ -63,12 +89,14 @@ export function createApp({ store, runtime, authenticate, audience = 'consumer',
     if (req.body?.dynamicOpening && !runtime.runWorldTurn) throw new ServiceError('OPENING_UNAVAILABLE', '当前运行时尚未提供动态开场。', 503);
     const playerProfileId = req.body?.playerProfileId;
     if(playerProfileId !== undefined && playerProfileId !== null) text(playerProfileId,'玩家身份',100);
+    const externalCharacter = !worldId && characterId.startsWith('axon:')
+      ? await (characterCatalog?.resolve(characterId, catalogOffset(req.body?.catalogOffset)) ?? Promise.reject(new ServiceError('CHARACTER_NOT_FOUND', '角色不可用。', 404))) : undefined;
     json(res.status(201), await store.createSession(owner(res), characterId, worldId, {
       ...(req.body?.dynamicOpening !== undefined ? { dynamicOpening: req.body.dynamicOpening } : {}),
       ...(req.body?.scene !== undefined ? { scene: req.body.scene } : {}),
       ...(req.body?.expectedRevision !== undefined ? { expectedRevision: req.body.expectedRevision } : {}),
       ...(playerProfileId !== undefined ? { playerProfileId } : {}),
-    }), publicSessionDetail);
+    }, externalCharacter), publicSessionDetail);
   }));
   app.get('/api/player-profiles',route(async (_req,res)=>json(res,{profiles:await store.listPlayerProfiles(owner(res))}, value => ({profiles:value.profiles.map(publicProfile)}))));
   app.post('/api/player-profiles',route(async (req,res)=>json(res.status(201),await store.savePlayerProfile(owner(res),null,req.body),publicProfile)));
