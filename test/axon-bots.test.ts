@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAxonBotCatalog, HOT_BOT_LIMIT, type AxonBotOptions } from '../server/axon-bots.ts';
+import { createAxonBotCatalog, HOT_BOT_PAGE_SIZE, type AxonBotOptions } from '../server/axon-bots.ts';
 
 const privateDefinition = '  PRIVATE_AXON_DEFINITION\n完整原始设定。  ';
 const at = Date.parse('2026-11-24T00:00:00.000Z');
@@ -30,9 +30,9 @@ function fixture(options: Partial<AxonBotOptions> = {}) {
     feed: (reply: Reply) => { feed = reply; }, detail: (reply: Reply) => { detail = reply; }, rpc: (reply: Reply) => { rpc = reply; } };
 }
 
-test('hot feed requests exactly the official top 100 anonymously, keeps order, deduplicates and projects only display fields', async () => {
+test('hot feed fetches only the requested live page, keeps order, deduplicates and projects only display fields', async () => {
   const f = fixture();
-  const rows = Array.from({ length: 101 }, (_, i) => prompt(`bot-${i}`, { uses: 101 - i }));
+  const rows = Array.from({ length: 25 }, (_, i) => prompt(`bot-${i}`, { uses: 25 - i }));
   rows[1] = prompt('bot-0');
   rows[2] = prompt('private', { accessibility: false });
   rows[3] = prompt('draft', { live: false });
@@ -40,54 +40,81 @@ test('hot feed requests exactly the official top 100 anonymously, keeps order, d
   rows[5] = prompt('bad/id');
   rows[6] = prompt('untitled', { title: '' });
   f.feed(() => json({ prompts: rows }));
-  const cards = await f.catalog.list();
-  assert.equal(HOT_BOT_LIMIT, 100);
-  assert.deepEqual(cards.map(card => card.id), ['axon:bot-0', ...Array.from({ length: 93 }, (_, i) => `axon:bot-${i + 7}`)]);
-  assert(!cards.some(card => card.id === 'axon:bot-100'));
+  const page = await f.catalog.list();
+  const cards = page.characters;
+  assert.equal(HOT_BOT_PAGE_SIZE, 24);
+  assert.equal(page.nextOffset, 24);
+  assert.deepEqual(cards.map(card => card.id), ['axon:bot-0', ...Array.from({ length: 17 }, (_, i) => `axon:bot-${i + 7}`)]);
+  assert(!cards.some(card => card.id === 'axon:bot-24'));
+  assert(cards.every(card => card.catalogOffset === 0));
   assert.equal(cards[0].source, 'axon');
   assert.equal(cards[0].thumbnailUrl, 'https://cdn.example/avatar.png');
   assert.doesNotMatch(JSON.stringify(cards), /PRIVATE_|initPrompt|definition|provenance|uses|visibility/);
   const call = f.calls[0];
   assert.equal(call.url.origin, 'http://node.test');
   assert.equal(call.url.pathname, '/prompt/v2/filter');
-  assert.deepEqual(Object.fromEntries(call.url.searchParams), { sort: 'top', take: '100', skip: '0', nsfw: 'false', language: 'en' });
+  assert.deepEqual(Object.fromEntries(call.url.searchParams), { sort: 'top', take: '24', skip: '0', nsfw: 'false', language: 'en' });
   assert.equal(call.init.method, 'GET');
   assert.equal(call.init.redirect, 'error');
+  assert.equal(call.init.cache, 'no-store');
   assert(call.init.signal instanceof AbortSignal);
   const headers = new Headers(call.init.headers);
   assert.equal(headers.get('x-app-id'), '2');
+  assert.equal(headers.get('cache-control'), 'no-cache');
   assert.equal(headers.get('authorization'), null);
   assert.equal(headers.get('cookie'), null);
   assert.equal(call.body, undefined);
 });
 
-test('concurrent feed reads share one request, return independent objects, expire, and do not serve stale cards after failure', async () => {
-  let now = at;
-  const f = fixture({ now: () => now, ttlMs: 1000 });
+test('every feed read including concurrent reads reaches upstream and immediately observes changes without stale fallback', async () => {
+  const f = fixture();
   let release!: () => void;
   const wait = new Promise<void>(resolve => { release = resolve; });
   f.feed(async () => { await wait; return json({ prompts: [prompt()] }); });
   const first = f.catalog.list(), second = f.catalog.list();
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 2);
   release();
   const [a, b] = await Promise.all([first, second]);
-  a[0].name = 'caller mutation'; a.push(a[0]);
-  assert.equal(b.length, 1); assert.notEqual(b[0].name, a[0].name);
-  assert.deepEqual(await f.catalog.list(), b);
-  assert.equal(f.calls.length, 1);
-  now += 1000;
+  a.characters[0].name = 'caller mutation'; a.characters.push(a.characters[0]);
+  assert.equal(b.characters.length, 1); assert.notEqual(b.characters[0].name, a.characters[0].name);
+  f.feed(() => json({ prompts: [prompt('new-bot')] }));
+  assert.deepEqual((await f.catalog.list()).characters.map(card => card.id), ['axon:new-bot']);
+  assert.equal(f.calls.length, 3);
   f.feed(() => json({ private: privateDefinition }, 503));
   await assert.rejects(f.catalog.list(), { code: 'BOT_CATALOG_UNAVAILABLE', status: 503 });
-  f.feed(() => json({ prompts: [prompt('new-bot')] }));
-  assert.deepEqual((await f.catalog.list()).map(card => card.id), ['axon:new-bot']);
-  assert.equal(f.calls.length, 3);
+  f.feed(() => json({ prompts: [] }));
+  assert.deepEqual(await f.catalog.list(), { characters: [], nextOffset: null });
+  assert.equal(f.calls.length, 5);
+});
+
+test('paging stops on short pages or the upstream offset boundary, and invalid offsets never issue requests', async () => {
+  const f = fixture();
+  for (const offset of [-1, 100, 0.5, NaN, Infinity, '24']) {
+    await assert.rejects(f.catalog.list(offset as number), { code: 'INPUT_INVALID', status: 422 });
+  }
+  assert.equal(f.calls.length, 0);
+  assert.equal((await f.catalog.list()).nextOffset, null);
+  f.feed(call => json({ prompts: Array.from({ length: Number(call.url.searchParams.get('take')) }, (_, i) => prompt('bot-' + i)) }));
+  const second = await f.catalog.list(24);
+  assert.equal(second.nextOffset, 48);
+  assert.deepEqual(second.characters.map(card => card.id), Array.from({ length: 24 }, (_, i) => 'axon:bot-' + (i + 24)));
+  const last = await f.catalog.list(96);
+  assert.deepEqual(last.characters.map(card => card.id), ['axon:bot-96', 'axon:bot-97', 'axon:bot-98', 'axon:bot-99']);
+  assert.equal(last.nextOffset, null);
+  assert.equal((await f.catalog.list(99)).characters.length, 1);
+  assert.deepEqual(f.calls.map(call => [call.url.searchParams.get('take'), call.url.searchParams.get('skip')]), [['24', '0'], ['48', '0'], ['100', '0'], ['100', '0']]);
+  assert.equal(f.calls.length, 4, 'Exactly one upstream call per explicit page, without prefetch or traversal');
 });
 
 test('resolving a recommended hidden-definition Bot rechecks anonymous public access before every Axon request', async () => {
   const f = fixture();
-  const first = await f.catalog.resolve('axon:bot-1');
-  const second = await f.catalog.resolve('axon:bot-1');
-  assert.deepEqual(f.calls.map(call => call.url.pathname), ['/prompt/v2/filter', '/prompt/bot-1', '/rpc', '/prompt/bot-1', '/rpc']);
+  f.feed(() => json({ prompts: [...Array.from({ length: 48 }, (_, i) => prompt('prefix-' + i)), prompt()] }));
+  const first = await f.catalog.resolve('axon:bot-1', 48);
+  const second = await f.catalog.resolve('axon:bot-1', 48);
+  assert.deepEqual(f.calls.map(call => call.url.pathname), ['/prompt/v2/filter', '/prompt/bot-1', '/rpc', '/prompt/v2/filter', '/prompt/bot-1', '/rpc']);
+  assert.equal(first.catalogOffset, 48);
+  assert.equal(f.calls[0].url.searchParams.get('take'), '72');
+  assert.equal(f.calls[3].url.searchParams.get('take'), '72');
   assert.equal(first.definition, privateDefinition);
   assert.equal(first.greeting, '  原始开场\n保持空白。  ');
   assert.equal(first.name, 'Axon 原名');
@@ -105,7 +132,7 @@ test('resolving a recommended hidden-definition Bot rechecks anonymous public ac
   assert.equal(request.init.method, 'POST');
   assert.deepEqual(request.body, { jsonrpc: '2.0', id: request.body?.id, method: 'prompt.get', params: { id: 'bot-1' } });
   assert.equal(typeof request.body?.id, 'string');
-  assert.notEqual(request.body?.id, f.calls[4].body?.id);
+  assert.notEqual(request.body?.id, f.calls[5].body?.id);
   assert.equal(new Headers(request.init.headers).get('x-app-id'), null);
 });
 
@@ -136,7 +163,7 @@ test('public detail denial, withdrawn state, or ID substitution fails before any
   await f.catalog.resolve('axon:bot-1');
   f.detail(() => json({ prompt: prompt('bot-1', { live: false }) }));
   await assert.rejects(f.catalog.resolve('axon:bot-1'), { code: 'CHARACTER_NOT_FOUND' });
-  assert.equal(f.calls.filter(call => call.url.pathname === '/rpc').length, 1, 'A cached feed cannot bypass a new public gate denial');
+  assert.equal(f.calls.filter(call => call.url.pathname === '/rpc').length, 1, 'A previous selection cannot bypass a new public gate denial');
 });
 
 test('JSON-RPC errors, mismatched request or Bot IDs, and malformed results fail closed without private diagnostics', async () => {
@@ -180,7 +207,7 @@ test('feed shape, JSON, network errors and response-size limits fail safely and 
       assert.doesNotMatch(String(error), /PRIVATE_/); return true;
     });
     f.feed(() => json({ prompts: [] }));
-    assert.deepEqual(await f.catalog.list(), []);
+    assert.deepEqual(await f.catalog.list(), { characters: [], nextOffset: null });
   }
 });
 

@@ -1,11 +1,14 @@
 import type { Bootstrap, Character, Message, PlayerProfile, SceneState, Session, SessionDetail, StoryEvent, TurnEvent, TurnView, WorldEntity, WorldView } from '../shared/contracts.ts';
 import type { StoryTime } from '../shared/living-world.ts';
+import { HOT_BOT_MAX_OFFSET } from './axon-bots.ts';
 
 // Explicit projections are shared by JSON and SSE. New internal fields stay private by default.
 export function publicCharacter(value: Character): Character {
   return { id: value.id, name: value.name, subtitle: value.subtitle, description: value.description,
     initial: value.initial, color: value.color, greeting: value.greeting,
-    thumbnailUrl: value.thumbnailUrl, coverUrl: value.coverUrl, language: value.language, source: value.source };
+    thumbnailUrl: value.thumbnailUrl, coverUrl: value.coverUrl, language: value.language, source: value.source,
+    ...(Number.isSafeInteger(value.catalogOffset) && value.catalogOffset! >= 0 && value.catalogOffset! <= HOT_BOT_MAX_OFFSET
+      ? { catalogOffset: value.catalogOffset } : {}) };
 }
 export function publicProfile(value: PlayerProfile): PlayerProfile {
   return { id: value.id, name: value.name, persona: value.persona, version: value.version };
@@ -79,7 +82,7 @@ export function publicBootstrap(value: Bootstrap): Bootstrap {
   return { characters: value.characters.map(publicCharacter), sessions: value.sessions.map(publicSession),
     worlds: value.worlds.map(publicWorld), status: { provider: value.status.provider },
     ...(value.characterCatalog ? { characterCatalog: { source: value.characterCatalog.source,
-      status: value.characterCatalog.status, limit: value.characterCatalog.limit } } : {}) };
+      status: value.characterCatalog.status, limit: value.characterCatalog.limit, nextOffset: value.characterCatalog.nextOffset } } : {}) };
 }
 const errors: Record<string, string> = {
   BOT_CATALOG_UNAVAILABLE: '热门角色暂时无法读取，请稍后重试。',

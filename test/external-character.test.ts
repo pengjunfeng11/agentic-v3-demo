@@ -15,7 +15,7 @@ function card(): ResolvedExternalCharacter {
 
 test('external card validation retains exact authored text, copies only its schema, and rejects invalid or oversized fields', () => {
   const original = card();
-  const resolved = validateExternalCharacter({ ...original, rawUpstream: 'do-not-copy', provenance: { ...original.provenance, credential: 'do-not-copy' } }, original.id);
+  const resolved = validateExternalCharacter({ ...original, catalogOffset: 24, rawUpstream: 'do-not-copy', provenance: { ...original.provenance, credential: 'do-not-copy' } }, original.id);
   assert.deepEqual(resolved, original);
   original.provenance.sourceRevision = 'later';
   assert.equal(resolved.provenance.sourceRevision, 'PRIVATE_REVISION_SENTINEL');
@@ -35,11 +35,11 @@ test('public card projection never returns private external definition or proven
   assert.doesNotMatch(JSON.stringify(projected), /PRIVATE_|definition|provenance|sourceRevision/);
 });
 
-test('public bootstrap catalog status projects only source, status and limit', () => {
-  const characterCatalog = { source: 'axon-hot' as const, status: 'unavailable' as const, limit: 24,
+test('public bootstrap catalog status projects only source, status, page size and next offset', () => {
+  const characterCatalog = { source: 'axon-hot' as const, status: 'unavailable' as const, limit: 24, nextOffset: 0,
     error: 'PRIVATE_UPSTREAM_FAILURE', rawPayload: { credential: 'PRIVATE_TOKEN' } };
   const result = publicBootstrap({ characters: [card()], sessions: [], worlds: [], status: { provider: 'live' }, characterCatalog });
-  assert.deepEqual(result.characterCatalog, { source: 'axon-hot', status: 'unavailable', limit: 24 });
+  assert.deepEqual(result.characterCatalog, { source: 'axon-hot', status: 'unavailable', limit: 24, nextOffset: 0 });
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_|rawPayload|credential|definition|provenance/);
 });
 

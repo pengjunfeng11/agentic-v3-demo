@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { Character } from '../shared/contracts.ts';
+import type { Character, CharacterPage } from '../shared/contracts.ts';
 import { ServiceError } from './runtime.ts';
 import { validateExternalCharacter, type ResolvedExternalCharacter } from './external-character.ts';
 
-export const HOT_BOT_LIMIT = 100;
+export const HOT_BOT_PAGE_SIZE = 24;
+const HOT_BOT_UPSTREAM_LIMIT = 100;
+export const HOT_BOT_MAX_OFFSET = HOT_BOT_UPSTREAM_LIMIT - 1;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 type JsonObject = Record<string, unknown>;
 const object = (value: unknown): value is JsonObject => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -31,33 +33,29 @@ function summary(prompt: JsonObject & { id: string }): Character {
     language: string(prompt.language) || 'und' };
 }
 export interface HotBotCatalog {
-  list(): Promise<Character[]>;
-  resolve(characterId: string): Promise<ResolvedExternalCharacter>;
+  list(offset?: number): Promise<CharacterPage>;
+  resolve(characterId: string, offset?: number): Promise<ResolvedExternalCharacter>;
 }
 export interface AxonBotOptions {
   nodeBaseUrl: string;
   axonRpcUrl: string;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
-  ttlMs?: number;
   timeoutMs?: number;
 }
-/** Only the bounded official anonymous hot feed is indexed; no owned/private bot credentials. */
+/** Fetch current official anonymous hot results on demand; never cache or prefetch the catalog. */
 export function createAxonBotCatalog(options: AxonBotOptions): HotBotCatalog {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const now = options.now ?? Date.now;
-  const ttlMs = options.ttlMs ?? 60_000;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const base = new URL(options.nodeBaseUrl);
   const rpc = new URL(options.axonRpcUrl);
   for (const url of [base, rpc]) if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Invalid server-side Bot endpoint');
   if (base.pathname !== '/') throw new Error('Node Bot endpoint must be an origin');
-  let cached: { cards: Character[]; expires: number } | undefined;
-  let loading: Promise<Character[]> | undefined;
   async function request(url: URL, body?: unknown, publicGate = false): Promise<JsonObject> {
     try {
-      const response = await fetchImpl(url, { method: body ? 'POST' : 'GET', redirect: 'error',
-        headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : { 'x-app-id': '2' }) },
+      const response = await fetchImpl(url, { method: body ? 'POST' : 'GET', redirect: 'error', cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', ...(body ? { 'Content-Type': 'application/json' } : { 'x-app-id': '2' }) },
         ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeoutMs) });
       if (!response.ok) { await response.body?.cancel(); throw publicGate && [401, 403, 404, 410].includes(response.status) ? notFound() : unavailable(); }
       const length = Number(response.headers.get('content-length'));
@@ -79,26 +77,29 @@ export function createAxonBotCatalog(options: AxonBotOptions): HotBotCatalog {
       return result;
     } catch (error) { if (error instanceof ServiceError) throw error; throw unavailable(); }
   }
-  async function list(): Promise<Character[]> {
-    if (cached && cached.expires > now()) return structuredClone(cached.cards);
-    if (!loading) loading = (async () => {
-      const url = new URL('/prompt/v2/filter', base);
-      url.search = new URLSearchParams({ sort: 'top', take: String(HOT_BOT_LIMIT), skip: '0', nsfw: 'false', language: 'en' }).toString();
-      const result = await request(url);
-      if (!Array.isArray(result.prompts)) throw unavailable();
-      const seen = new Set<string>();
-      const cards = result.prompts.slice(0, HOT_BOT_LIMIT).filter((row): row is JsonObject & { id: string } => {
-        if (!publicPrompt(row) || seen.has(row.id)) return false;
-        seen.add(row.id); return true;
-      }).map(summary);
-      cached = { cards, expires: now() + ttlMs };
-      return cards;
-    })().finally(() => { loading = undefined; });
-    return structuredClone(await loading);
+  async function list(offset = 0): Promise<CharacterPage> {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > HOT_BOT_MAX_OFFSET) throw new ServiceError('INPUT_INVALID', '角色列表页码无效。', 422);
+    const url = new URL('/prompt/v2/filter', base);
+    // The anonymous desktop top endpoint currently ignores skip. Fetch just the
+    // current prefix needed for this page, then return its slice; no saved list.
+    const take = Math.min(offset + HOT_BOT_PAGE_SIZE, HOT_BOT_UPSTREAM_LIMIT);
+    url.search = new URLSearchParams({ sort: 'top', take: String(take), skip: '0', nsfw: 'false', language: 'en' }).toString();
+    const result = await request(url);
+    if (!Array.isArray(result.prompts)) throw unavailable();
+    const rows = result.prompts.slice(0, take).slice(offset);
+    const seen = new Set<string>();
+    const characters = rows.filter((row): row is JsonObject & { id: string } => {
+      if (!publicPrompt(row) || seen.has(row.id)) return false;
+      seen.add(row.id); return true;
+    }).map(row => ({ ...summary(row), catalogOffset: offset }));
+    // Advance by raw upstream rows, so filtered or duplicate cards cannot repeat a page.
+    const nextOffset = rows.length === HOT_BOT_PAGE_SIZE && take < HOT_BOT_UPSTREAM_LIMIT
+      ? offset + HOT_BOT_PAGE_SIZE : null;
+    return { characters, nextOffset };
   }
-  async function resolve(characterId: string): Promise<ResolvedExternalCharacter> {
+  async function resolve(characterId: string, offset = 0): Promise<ResolvedExternalCharacter> {
     const id = characterId.startsWith('axon:') ? characterId.slice(5) : '';
-    if (!botId(id) || !(await list()).some(card => card.id === characterId)) throw notFound();
+    if (!botId(id) || !(await list(offset)).characters.some(card => card.id === characterId)) throw notFound();
     // Recheck public access for every new story; the raw Axon RPC is not an ACL.
     const detail = await request(new URL('/prompt/' + encodeURIComponent(id), base), undefined, true);
     if (!publicPrompt(detail.prompt, id)) throw notFound();
@@ -108,10 +109,11 @@ export function createAxonBotCatalog(options: AxonBotOptions): HotBotCatalog {
       || !object(result.result.prompt) || result.result.prompt.id !== id) throw unavailable();
     const raw = result.result.prompt;
     const publicCard = summary(detail.prompt);
-    return validateExternalCharacter({ ...publicCard, name: string(raw.title) || publicCard.name,
+    const resolved = validateExternalCharacter({ ...publicCard, name: string(raw.title) || publicCard.name,
       definition: string(raw.init_prompt), greeting: string(raw.welcome_message),
       provenance: { kind: 'axon', botId: id, fetchedAt: new Date(now()).toISOString(),
         ...(string(detail.prompt.updatedAt) ? { sourceRevision: string(detail.prompt.updatedAt) } : {}) } }, characterId);
+    return { ...resolved, catalogOffset: offset };
   }
   return { list, resolve };
 }

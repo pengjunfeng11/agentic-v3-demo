@@ -5,7 +5,10 @@ export interface Character {
   initial: string; color: 'sage' | 'blue' | 'peach'; greeting: string;
   thumbnailUrl?: string | null; coverUrl?: string | null; language?: string;
   source?: 'sample' | 'legacy' | 'generated' | 'axon';
+  /** Public page location used to revalidate a current recommendation. */
+  catalogOffset?: number;
 }
+export interface CharacterPage { characters: Character[]; nextOffset: number | null }
 export interface PlayerProfile { id: string; name: string; persona: string; version: number }
 export interface SceneState { location: string | null; presentCharacterIds: string[]; updatedAt?: string; mode?: 'direct' | 'ensemble' | 'observe'; situation?: string; playerPresent?: boolean }
 export type AgentKey = 'main' | 'actor' | 'updater' | 'opening' | 'pulse' | 'arbiter';
@@ -81,7 +84,7 @@ export interface RuntimeAuditView {
 }
 export interface Bootstrap {
   characters: Character[]; sessions: Session[]; worlds: WorldView[];
-  characterCatalog?: { source: 'axon-hot'; status: 'ready' | 'unavailable'; limit: number };
+  characterCatalog?: { source: 'axon-hot'; status: 'ready' | 'unavailable'; limit: number; nextOffset: number | null };
   status: Pick<RuntimeStatus, 'provider'> & Partial<Omit<RuntimeStatus, 'provider'>>;
 }
 export interface SessionDetail { session: Session; messages: Message[]; world: WorldView; hasMore: boolean; nextBefore: string | null }

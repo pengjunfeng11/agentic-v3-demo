@@ -11,6 +11,7 @@ import { Avatar } from './Avatar';
 import { MessageBubble } from './ChatMessage';
 import { CharacterLibrary } from './CharacterLibrary';
 import { recentCharacters } from './catalog';
+import { resolveCatalogSelection, withSelectedCatalogOffset } from './character-pages';
 import { SceneEditor, SceneStrip } from './ScenePanel';
 import { MemoryDrawer } from './MemoryDrawer';
 import { SceneBuilder, type SceneSeed } from './SceneBuilder';
@@ -58,7 +59,7 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
   const { failedTurns, pendingTurns } = worldBackgroundStatus(activeWorld);
   const characters = bootstrap?.characters || [];
   const libraryCharacters = bootstrap?.characterCatalog
-    ? characters.filter(character => character.source === 'axon' || character.source === 'sample')
+    ? characters.filter(character => character.source === 'sample')
     : characters.filter(character => character.source !== 'generated');
   const cast = worldCharacters(activeWorld, characters, state.detail?.session.characterId);
   const activeCharacter = cast.find(character => character.id === state.detail?.session.characterId) || characters.find(character => character.id === state.detail?.session.characterId);
@@ -128,9 +129,9 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
       characterRequest.current?.abort();
       characterRequest.current = request;
       setCreating(character.id);
-      try { character = await client.character(character.id, { signal: request.signal }); }
+      try { character = await resolveCatalogSelection(client, character, request.signal); }
       catch (error) { if (mounted.current && !request.signal.aborted) setNotice(error instanceof Error ? error.message : '角色暂时无法读取。'); return; }
-      finally { if (mounted.current) setCreating(null); }
+      finally { if (mounted.current && characterRequest.current === request) setCreating(null); }
       if (!mounted.current || request.signal.aborted) return;
     }
     setDrawer(null);
@@ -140,7 +141,7 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
     if (creating) return;
     setCreating(input.characterId);
     try {
-      const result = await client.createSession(input);
+      const result = await client.createSession(withSelectedCatalogOffset(input, sceneBuilder?.seed));
       if (!mounted.current) return;
       setSceneBuilder(null); openSession(result.session.id); refresh();
     } catch (failure) {
@@ -194,7 +195,7 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
       <div className="av-library-brand"><div><h1>续章 <span>Next chapter</span></h1><p>让故事，继续发生。</p></div><span className="av-brand-star">✧</span></div>
       <button className="av-new-story" onClick={() => { setView('characters'); setMobileLibrary(false); }}><Plus size={16} /><span>开启一段新故事</span><ChevronRight size={15} /></button>
       <label className="av-search"><Search size={15} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="寻找一段对话" aria-label="搜索会话" /></label>
-      <div className="av-section-label"><span>最近交谈</span><button className="av-all-characters" onClick={() => { setView('characters'); setMobileLibrary(false); }}>根角色卡 {characters.filter(character => character.source !== 'sample').length}<ChevronRight size={11} /></button></div>
+      <div className="av-section-label"><span>最近交谈</span><button className="av-all-characters" onClick={() => { setView('characters'); setMobileLibrary(false); }}>{bootstrap?.characterCatalog ? '热门角色' : `根角色卡 ${characters.filter(character => character.source !== 'sample').length}`}<ChevronRight size={11} /></button></div>
       <div className="av-character-list">{recent.map(character => <button key={character.id} disabled={Boolean(creating)} className={'av-character-row ' + (activeCharacter?.id === character.id && view === 'chat' ? 'is-active' : '')} onClick={() => void chooseCharacter(character)}><Avatar character={character} /><span><strong>{character.name}</strong><small>{character.subtitle || character.language || '继续你们的故事'}</small></span>{creating === character.id ? <LoaderCircle size={13} className="av-spin" /> : activeCharacter?.id === character.id && <i className="av-tiny-dot" />}</button>)}</div>
       <div className="av-section-label av-recent-label"><span>最近的对话</span><History size={12} /></div>
       <div className="av-sessions">{sessions.map(session => { const label = sessionPresentation(session, bootstrap?.worlds); return <button key={session.id} title={label.option} className={selectedId === session.id ? 'is-active' : ''} onClick={() => openSession(session.id)}><MessageCircle size={13} /><span className="av-session-caption"><strong>{session.title}</strong><small>{label.worldLabel}</small><small>{label.stamp}</small></span><ChevronRight size={11} /></button>; })}{!sessions.length && <p className="av-list-empty">{search ? '没有找到这段对话' : '你的第一章，从这里开始。'}</p>}</div>
@@ -202,7 +203,7 @@ function ScopedApp({ client = defaultClient, initialSessionId, onSessionChange, 
     </aside>
 
     <main className="av-main">
-      {!bootstrap ? <div className="av-center-state">{bootError ? <><CircleHelp /><h2>故事服务暂未连接</h2><p>{bootError}</p><button className="av-button" onClick={refresh}><RotateCcw size={14} />重新连接</button></> : <><LoaderCircle className="av-spin" /><p>正在翻开故事…</p></>}</div> : view === 'characters' ? <CharacterLibrary characters={libraryCharacters} catalogStatus={bootstrap.characterCatalog?.status} onRefresh={refresh} fresh={true} hasWorld={false} creating={creating} onChoose={character => void chooseCharacter(character, true)} onBack={() => setView('chat')} /> : view === 'world' ? <WorldArchive world={activeWorld} templates={characters} focusId={activeCharacter?.id} client={client} busy={pending || state.loading} onBack={() => setView('chat')} onScene={(world, defaults) => setSceneBuilder({ world, defaults })} onUpdated={async () => { await reload(); refresh(); }} /> : view === 'settings' ? <>
+      {!bootstrap ? <div className="av-center-state">{bootError ? <><CircleHelp /><h2>故事服务暂未连接</h2><p>{bootError}</p><button className="av-button" onClick={refresh}><RotateCcw size={14} />重新连接</button></> : <><LoaderCircle className="av-spin" /><p>正在翻开故事…</p></>}</div> : view === 'characters' ? <CharacterLibrary characters={libraryCharacters} client={client} catalogStatus={bootstrap.characterCatalog?.status} fresh={true} hasWorld={false} creating={creating} onChoose={character => void chooseCharacter(character, true)} onBack={() => setView('chat')} /> : view === 'world' ? <WorldArchive world={activeWorld} templates={characters} focusId={activeCharacter?.id} client={client} busy={pending || state.loading} onBack={() => setView('chat')} onScene={(world, defaults) => setSceneBuilder({ world, defaults })} onUpdated={async () => { await reload(); refresh(); }} /> : view === 'settings' ? <>
         <header className="av-page-header"><div><span className="av-eyebrow">MAKE YOURSELF COMFORTABLE</span><h2>给对话，留一点自己的空间。</h2><p>只保留真正需要的偏好。</p></div><IconButton label="返回聊天" onClick={() => setView('chat')}><ArrowLeft size={19} /></IconButton></header>
         <div className="av-settings"><PlayerProfiles client={client} world={state.detail?.session.id === selectedId ? activeWorld : undefined} busy={pending||state.loading||state.detail?.session.id !== selectedId} onApplied={refreshPlayerWorld} /><section><span className="av-setting-icon"><Settings2 size={20} /></span><h3>阅读偏好</h3><p>调整消息文字的大小，让长一点的故事也轻松好读。</p><label className="av-setting-row"><span>文字大小 <small>{fontSize}px</small></span><input type="range" min="13" max="19" value={fontSize} onChange={event => setFontSize(Number(event.target.value))} /></label><div className="av-reading-preview" style={{ fontSize }}>风翻过书页，而我们的故事，才刚刚开始。</div></section><section><span className="av-setting-icon"><Sparkles size={20} /></span><h3>关于续章</h3><p>一个围绕角色、对话与持续记忆的轻量实验。</p><dl><div><dt>当前运行</dt><dd>{isDemo ? '演示模式' : '在线生成'}</dd></div><div><dt>消息和故事</dt><dd>服务端持久保存</dd></div></dl><p className="av-settings-note">{isDemo ? '演示模式不调用真实语言模型。你看到的角色回复用于验证交互与持久化流程。' : '回复由当前配置的模型生成；故事变化以服务端确认的状态为准。'}</p></section></div>
       </> : <>

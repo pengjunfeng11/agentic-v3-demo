@@ -6,6 +6,7 @@ import { createAxonBotCatalog } from '../server/axon-bots.ts';
 import type { StoryRuntime } from '../server/runtime.ts';
 import type { StoryStore } from '../server/store.ts';
 import type { ResolvedExternalCharacter } from '../server/external-character.ts';
+import { publicCharacter } from '../server/public-view.ts';
 
 const hidden = 'PRIVATE_AXON_DEFINITION';
 const forged = 'FORGED_CLIENT_DEFINITION';
@@ -18,6 +19,8 @@ const safe = (value: unknown) => assert.doesNotMatch(typeof value === 'string' ?
 
 async function fixture() {
   const upstreamCalls: string[] = [];
+  const feedTakes: number[] = [];
+  const prefixes = new Map<number, unknown[]>([[24, [upstreamPrompt]]]);
   const creates: any[][] = [];
   let offline = false, publicAccess = true, seedCalls = 0;
   let saved: ResolvedExternalCharacter | undefined;
@@ -27,7 +30,12 @@ async function fixture() {
       const url = new URL(String(input)); upstreamCalls.push(url.pathname);
       assert.equal(new Headers(init?.headers).get('authorization'), null);
       if (offline) throw new Error(hidden);
-      if (url.pathname === '/prompt/v2/filter') return json({ prompts: [upstreamPrompt] });
+      if (url.pathname === '/prompt/v2/filter') {
+        assert.equal(url.searchParams.get('skip'), '0');
+        const take = Number(url.searchParams.get('take')); feedTakes.push(take);
+        assert(take >= 24 && take <= 100);
+        return json({ prompts: prefixes.get(take) ?? [] });
+      }
       if (url.pathname === '/prompt/bot-1') return json({ prompt: { ...upstreamPrompt, accessibility: publicAccess } });
       if (url.pathname === '/rpc') {
         const body = JSON.parse(String(init?.body));
@@ -67,7 +75,8 @@ async function fixture() {
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { upstreamCalls, creates, saved: () => saved, seedCalls: () => seedCalls,
+  return { upstreamCalls, feedTakes, creates, saved: () => saved, seedCalls: () => seedCalls,
+    setPrefix: (take: number, rows: unknown[]) => { prefixes.set(take, rows); },
     setOffline: () => { offline = true; }, revoke: () => { publicAccess = false; },
     request: (path: string, method = 'GET', body?: unknown, authenticated = true) => fetch(base + path, {
       method, headers: { ...(authenticated ? { 'x-guest': 'guest' } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
@@ -77,21 +86,27 @@ async function fixture() {
   };
 }
 
-test('authenticated public bootstrap/selection exposes only Bot display fields and never seeds an external world', async () => {
+test('bootstrap never reads the remote catalog; page and selection expose only public card fields', async () => {
   const f = await fixture();
   try {
     const bootstrap = await f.request('/api/bootstrap');
     assert.equal(bootstrap.status, 200);
     const body = await bootstrap.json(); safe(body);
-    assert.deepEqual(body.characters.map((card: any) => card.id), [characterId, 'legacy']);
-    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'ready', limit: 100 });
+    assert.deepEqual(body.characters.map((card: any) => card.id), ['legacy']);
+    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'ready', limit: 24, nextOffset: 0 });
     assert.equal(f.seedCalls(), 0);
+    assert.deepEqual(f.upstreamCalls, []);
+    const page = await f.request('/api/characters?offset=0');
+    assert.equal(page.status, 200); assert.equal(page.headers.get('cache-control'), 'private, no-store');
+    const rows = await page.json(); safe(rows);
+    assert.deepEqual(rows.characters.map((card: any) => card.id), [characterId]);
+    assert.equal(rows.characters[0].catalogOffset, 0); assert.equal(rows.nextOffset, null);
     const selected = await f.request('/api/characters/' + encodeURIComponent(characterId));
     assert.equal(selected.status, 200);
     const card = await selected.json(); safe(card);
-    assert.equal(card.source, 'axon'); assert.equal(card.name, '公开角色');
+    assert.equal(card.source, 'axon'); assert.equal(card.name, '公开角色'); assert.equal(card.catalogOffset, 0);
     assert.equal(f.creates.length, 0);
-    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/bot-1', '/rpc']);
+    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/v2/filter', '/prompt/bot-1', '/rpc']);
   } finally { await f.close(); }
 });
 
@@ -111,7 +126,7 @@ test('new session resolves again after selection and only trusted server data re
     assert.equal(resolved.definition, hidden);
     assert.equal(resolved.provenance.botId, 'bot-1');
     assert.doesNotMatch(JSON.stringify(f.creates), /FORGED_CLIENT/);
-    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/bot-1', '/rpc', '/prompt/bot-1', '/rpc']);
+    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/bot-1', '/rpc', '/prompt/v2/filter', '/prompt/bot-1', '/rpc']);
   } finally { await f.close(); }
 });
 
@@ -123,7 +138,7 @@ test('withdrawal between selection and creation prevents both Axon access and pe
     const response = await f.request('/api/sessions', 'POST', { characterId });
     assert.equal(response.status, 404); safe(await response.json());
     assert.equal(f.creates.length, 0);
-    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/bot-1', '/rpc', '/prompt/bot-1']);
+    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/bot-1', '/rpc', '/prompt/v2/filter', '/prompt/bot-1']);
   } finally { await f.close(); }
 });
 
@@ -131,7 +146,7 @@ test('unknown Bots and unauthenticated requests cannot access raw upstream data 
   const f = await fixture();
   try {
     for (const [path, method, body] of [
-      ['/api/bootstrap', 'GET'], ['/api/characters/axon%3Abot-1', 'GET'], ['/api/sessions', 'POST', { characterId }],
+      ['/api/bootstrap', 'GET'], ['/api/characters?offset=24', 'GET'], ['/api/characters/axon%3Abot-1', 'GET'], ['/api/sessions', 'POST', { characterId }],
     ] as const) {
       const response = await f.request(path, method, body, false);
       assert.equal(response.status, 401); safe(await response.json());
@@ -143,7 +158,7 @@ test('unknown Bots and unauthenticated requests cannot access raw upstream data 
       const response = await f.request(path, method, body);
       assert.equal(response.status, 404); safe(await response.json());
     }
-    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter']);
+    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/v2/filter']);
     assert.equal(f.creates.length, 0);
   } finally { await f.close(); }
 });
@@ -154,7 +169,7 @@ test('existing world sessions and recovery use their snapshot even when the upst
     assert.equal((await f.request('/api/sessions', 'POST', { characterId })).status, 201);
     const count = f.upstreamCalls.length;
     f.setOffline();
-    const continued = await f.request('/api/sessions', 'POST', { characterId, worldId: 'w1', expectedRevision: 1,
+    const continued = await f.request('/api/sessions', 'POST', { characterId, worldId: 'w1', expectedRevision: 1, catalogOffset: { invalid: true },
       externalCharacter: { definition: forged }, definition: forged, source: 'axon' });
     assert.equal(continued.status, 201); safe(await continued.json());
     assert.equal(f.creates[1][4], undefined, 'Existing world requests must not resolve or pass a fresh external card');
@@ -171,15 +186,92 @@ test('existing world sessions and recovery use their snapshot even when the upst
   } finally { await f.close(); }
 });
 
-test('catalog failure reports an unavailable state but does not block bootstrap of saved stories', async () => {
+test('an offline catalog does not participate in saved-story bootstrap and fails only on an explicit page request', async () => {
   const f = await fixture();
   try {
     f.setOffline();
     const response = await f.request('/api/bootstrap');
     assert.equal(response.status, 200);
     const body = await response.json(); safe(body);
-    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'unavailable', limit: 100 });
+    assert.deepEqual(body.characterCatalog, { source: 'axon-hot', status: 'ready', limit: 24, nextOffset: 0 });
     assert.equal(body.worlds[0].id, 'w1');
     assert.deepEqual(body.characters.map((card: any) => card.id), ['legacy']);
+    assert.equal(f.upstreamCalls.length, 0);
+    const page = await f.request('/api/characters?offset=24');
+    assert.equal(page.status, 503); safe(await page.json());
   } finally { await f.close(); }
+});
+
+test('every page request reads a fresh bounded ranking prefix and exposes only its requested slice', async () => {
+  const f = await fixture();
+  try {
+    for (const name of ['first version', 'second version']) {
+      f.setPrefix(48, [...Array.from({ length: 24 }, (_, i) => ({ ...upstreamPrompt, id: 'first-' + i })), { ...upstreamPrompt, title: name }]);
+      const response = await f.request('/api/characters?offset=24');
+      assert.equal(response.status, 200);
+      const page = await response.json(); safe(page);
+      assert.equal(page.characters[0].name, name);
+      assert.equal(page.characters[0].catalogOffset, 24);
+      assert.equal(page.nextOffset, null);
+    }
+    f.setPrefix(100, Array.from({ length: 100 }, (_, i) => ({ ...upstreamPrompt, id: 'rank-' + i })));
+    const finalPage = await f.request('/api/characters?offset=99');
+    assert.equal(finalPage.status, 200);
+    const last = await finalPage.json(); safe(last);
+    assert.equal(last.nextOffset, null); assert.equal(last.characters.length, 1);
+    assert.equal(last.characters[0].id, 'axon:rank-99'); assert.equal(last.characters[0].catalogOffset, 99);
+    assert.deepEqual(f.feedTakes, [48, 48, 100]);
+    assert.deepEqual(f.upstreamCalls, ['/prompt/v2/filter', '/prompt/v2/filter', '/prompt/v2/filter']);
+  } finally { await f.close(); }
+});
+
+test('invalid query or body offsets fail before touching an upstream or persisting a session', async () => {
+  const f = await fixture();
+  try {
+    for (const offset of ['', '-1', '100', '2001', '1.5', '01', '+1', '1e2', 'Infinity', 'NaN', '9007199254740992', ' 0']) {
+      for (const path of ['/api/characters', '/api/characters/axon%3Abot-1']) {
+        const response = await f.request(path + '?offset=' + encodeURIComponent(offset));
+        assert.equal(response.status, 422, offset); safe(await response.json());
+      }
+    }
+    const duplicate = await f.request('/api/characters?offset=0&offset=24');
+    assert.equal(duplicate.status, 422); safe(await duplicate.json());
+    for (const offset of [-1, 100, 2001, 1.5, Number.MAX_SAFE_INTEGER + 1, '24', null, [], {}]) {
+      const response = await f.request('/api/sessions', 'POST', { characterId, catalogOffset: offset });
+      assert.equal(response.status, 422); safe(await response.json());
+    }
+    assert.deepEqual(f.upstreamCalls, []); assert.equal(f.creates.length, 0);
+  } finally { await f.close(); }
+});
+
+test('page membership is fresh on selection and creation; forged offsets or character bodies cannot authorize an import', async () => {
+  const f = await fixture();
+  try {
+    const firstPage = Array.from({ length: 24 }, (_, i) => ({ ...upstreamPrompt, id: 'first-' + i }));
+    f.setPrefix(24, firstPage); f.setPrefix(48, [...firstPage, upstreamPrompt]);
+    const wrongPage = await f.request('/api/characters/axon%3Abot-1?offset=0');
+    assert.equal(wrongPage.status, 404); safe(await wrongPage.json());
+    const selected = await f.request('/api/characters/axon%3Abot-1?offset=24');
+    assert.equal(selected.status, 200); const card = await selected.json(); safe(card); assert.equal(card.catalogOffset, 24);
+    const mismatch = await f.request('/api/sessions', 'POST', { characterId, catalogOffset: 0, definition: forged,
+      source: 'axon', externalCharacter: { ...card, definition: forged }, provenance: { kind: 'axon', botId: 'bot-1' } });
+    assert.equal(mismatch.status, 404); safe(await mismatch.json()); assert.equal(f.creates.length, 0);
+    const allowed = await f.request('/api/sessions', 'POST', { characterId, catalogOffset: 24, dynamicOpening: false, definition: forged });
+    assert.equal(allowed.status, 201); safe(await allowed.json());
+    assert.equal(f.creates[0][4].definition, hidden); assert.deepEqual(f.creates[0][3], { dynamicOpening: false });
+    f.setPrefix(48, firstPage);
+    const removed = await f.request('/api/sessions', 'POST', { characterId, catalogOffset: 24 });
+    assert.equal(removed.status, 404); safe(await removed.json()); assert.equal(f.creates.length, 1);
+    assert.deepEqual(f.feedTakes, [24, 48, 24, 48, 48]);
+    assert.equal(f.upstreamCalls.filter(path => path === '/rpc').length, 2);
+    assert.doesNotMatch(JSON.stringify(f.creates), /FORGED_CLIENT/);
+  } finally { await f.close(); }
+});
+
+test('public character offsets are projected only when they are valid nonnegative bounded integers', () => {
+  const card = { id: characterId, name: '公开角色', subtitle: '', description: '', initial: '公', color: 'sage', greeting: '' };
+  for (const offset of [0, 24, 99]) assert.equal(publicCharacter({ ...card, catalogOffset: offset } as any).catalogOffset, offset);
+  for (const offset of [-1, 1.5, 100, 2001, Number.NaN, Number.POSITIVE_INFINITY, '24', null, {}]) {
+    assert(!Object.hasOwn(publicCharacter({ ...card, catalogOffset: offset } as any), 'catalogOffset'));
+  }
 });
